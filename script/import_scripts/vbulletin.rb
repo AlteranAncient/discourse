@@ -28,6 +28,10 @@ class ImportScripts::VBulletin < ImportScripts::Base
   TIMEZONE ||= ENV['TIMEZONE'] || "America/Los_Angeles"
   TABLE_PREFIX ||= ENV['TABLE_PREFIX'] || "vb_"
   ATTACHMENT_DIR ||= ENV['ATTACHMENT_DIR'] || '/path/to/your/attachment/folder'
+  
+  # Change these to your vBulletin Admin/Mod group IDs. Set to -1 to disable/ignore.
+  GROUP_VB_ADMIN ||= ENV['GROUP_VB_ADMIN'] || 6
+  GROUP_VB_MOD ||= ENV['GROUP_VB_MOD'] || 7
 
   puts "#{DB_USER}:#{DB_PW}@#{DB_HOST} wants #{DB_NAME}"
 
@@ -65,6 +69,8 @@ export DB_PW=""
 export DB_USER="root"
 export TABLE_PREFIX="vb_"
 export ATTACHMENT_DIR '/path/to/your/attachment/folder'
+export GROUP_VB_ADMIN=6
+export GROUP_VB_MOD=7
 
 Exiting.
 EOM
@@ -134,7 +140,11 @@ EOM
         email = user["email"].presence || fake_email
         email = fake_email unless email[EmailValidator.email_regex]
 
+        # Combine all Usergroup IDs
+        group_ids = [ user["usergroupid"], *user["membergroupids"].split(',').map(&:to_i) ]
+
         username = @htmlentities.decode(user["username"]).strip
+        ip_addr = IPAddr.new(user["ipaddress"]) rescue nil
 
         {
           id: user["userid"],
@@ -144,12 +154,22 @@ EOM
           website: user["homepage"].strip,
           title: @htmlentities.decode(user["usertitle"]).strip,
           primary_group_id: group_id_from_imported_group_id(user["usergroupid"].to_i),
+          admin: group_ids.include?(GROUP_VB_ADMIN),
+          moderator: group_ids.include?(GROUP_VB_MOD),
           created_at: parse_timestamp(user["joindate"]),
           last_seen_at: parse_timestamp(user["lastvisit"]),
+          ip_address: ip_addr,
           post_create_action: proc do |u|
             @old_username_to_new_usernames[user["username"]] = u.username
             import_profile_picture(user, u)
             import_profile_background(user, u)
+            # Add user to the necessary groups
+            GroupUser.transaction do
+              group_ids.each do |gid|
+                (group_id = group_id_from_imported_group_id(gid)) &&
+                  GroupUser.find_or_create_by(user: u, group_id: group_id)
+              end
+            end
           end
         }
       end
